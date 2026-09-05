@@ -1,6 +1,33 @@
 name: Rust CI
 
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch gains leg/profile/racecar_run inputs so racecar can pick
+#      the baseline vs instrumented arm (upstream's bare workflow_dispatch had no
+#      way to express it).
+#   2. actions/checkout -> crashappsec/action-checkout, which wraps checkout and
+#      setup-chalk-action together (the internal pattern, cf. dummy-deployments).
+#   3. permissions: id-token: write for the action's OIDC connect. Declaring the
+#      block zeroes every unlisted scope, so contents: read is restated.
+#   4. A fail-closed assertion on the instrumented arm.
+#   5. windows-smoke dropped: observables are linux-only.
+# Build and test COMMANDS are byte-identical to upstream.
+
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -47,10 +74,18 @@ on:
       - tests/test_roadmap_helpers.py
       - docs/**
       - rust/**
-  workflow_dispatch:
+
+run-name: "Rust CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
+permissions:
+  contents: read
+  id-token: write
 
 concurrency:
-  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Upstream keys on github.ref, so racecar's two dispatches on main land in the
+  # same group and cancel-in-progress kills the first arm. Dispatch runs get a
+  # per-run group; push/PR keying is left exactly as upstream.
+  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -59,6 +94,9 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
+  # The one variable that separates the arms. On baseline, action-checkout skips
+  # its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
 
 jobs:
   doc-source-of-truth:
@@ -68,7 +106,26 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # Default is best-effort; a silently-uninstrumented run is a corrupt
+          # data point rather than a degraded one, so fail closed.
+          observables_continue_on_error: false
+          # Upstream used actions/checkout, which does not fetch LFS.
+          lfs: false
+
+      # Assert on the host-server socket, NOT on LD_PRELOAD: co-monitor's loader
+      # clears LD_PRELOAD once it has injected, so an empty LD_PRELOAD inside the
+      # shell is what SUCCESS looks like. pgrep is no good either -- co-hostd
+      # daemonizes under another name.
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
@@ -85,7 +142,19 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -99,7 +168,19 @@ jobs:
     name: cargo test --workspace
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -111,7 +192,19 @@ jobs:
     name: cargo clippy --workspace
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -120,42 +213,3 @@ jobs:
           workspaces: rust -> target
       - name: Run workspace clippy
         run: cargo clippy --workspace
-
-  windows-smoke:
-    name: windows PowerShell smoke
-    runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: rust
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-      - name: Build CLI for Windows smoke
-        run: cargo build -p rusty-claude-cli
-      - name: Smoke local commands without live credentials
-        env:
-          ANTHROPIC_API_KEY: ""
-          ANTHROPIC_AUTH_TOKEN: ""
-          OPENAI_API_KEY: ""
-          XAI_API_KEY: ""
-          DASHSCOPE_API_KEY: ""
-        run: |
-          $ErrorActionPreference = "Stop"
-          $env:CLAW_CONFIG_HOME = Join-Path $env:RUNNER_TEMP "claw config home"
-          New-Item -ItemType Directory -Force -Path $env:CLAW_CONFIG_HOME | Out-Null
-          $workspace = Join-Path $env:RUNNER_TEMP "claw path smoke"
-          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-          $claw = Join-Path $env:GITHUB_WORKSPACE "rust\target\debug\claw.exe"
-          Push-Location $workspace
-          try {
-            & $claw help
-            & $claw status
-            & $claw config env
-            & $claw doctor
-          } finally {
-            Pop-Location
-          }
