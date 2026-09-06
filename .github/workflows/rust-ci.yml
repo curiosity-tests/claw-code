@@ -85,7 +85,7 @@ concurrency:
   # Upstream keys on github.ref, so racecar's two dispatches on main land in the
   # same group and cancel-in-progress kills the first arm. Dispatch runs get a
   # per-run group; push/PR keying is left exactly as upstream.
-  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref }}
+  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || ('push' == 'workflow_dispatch' && github.run_id) || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -96,7 +96,7 @@ env:
   CARGO_TERM_COLOR: always
   # The one variable that separates the arms. On baseline, action-checkout skips
   # its Set up Chalk step entirely.
-  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+  CHALK_ON: ${{ inputs.leg == 'instrumented' }}
 
 jobs:
   doc-source-of-truth:
